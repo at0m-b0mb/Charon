@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from charon.core.clipboard import Side  # noqa: E402
-from charon.core.model import Grade, Protocol, RemoteEntry, SecurityState  # noqa: E402
+from charon.core.model import Protocol, RemoteEntry, SecurityState  # noqa: E402
 
 
 @pytest.fixture(scope="module")

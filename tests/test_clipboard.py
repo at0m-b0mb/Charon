@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from charon.core.clipboard import ClipItem, Operation, Side, TransferClipboard
 from charon.core.model import RemoteEntry
 

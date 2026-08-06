@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("CHARON_HOME", "/tmp/charon-screenshots")
 
-from PyQt6.QtCore import QSize, Qt  # noqa: E402
+from PyQt6.QtCore import QSize  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from charon.core.clipboard import ClipItem, Operation, Side  # noqa: E402
@@ -132,6 +132,7 @@ def demo_jobs() -> list[TransferJob]:
 
 def main() -> int:
     app = QApplication(sys.argv[:1])
+    app.setApplicationName("Charon")
     p = palette("dark")
 
     print("Rendering Charon screenshots…")

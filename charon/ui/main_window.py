@@ -42,11 +42,10 @@ from PyQt6.QtWidgets import (
 from ..core.clipboard import ClipItem, Operation, Side, TransferClipboard
 from ..core.model import Credentials, Grade, Protocol, SecurityState, Site
 from ..core.policy import Verdict, check_connection
-from ..core.safety import remote_join
 from ..core.secretstore import SecretStore, StorageMode, secret_id
 from ..core.session import Session
 from ..core.store import Settings, SiteStore
-from ..core.transfer import Conflict, JobState, TransferEngine, TransferJob
+from ..core.transfer import JobState, TransferEngine, TransferJob
 from ..core.trust import CertPinStore, HostKeyStore, sha256_fingerprint
 from ..core.vault import Vault, VaultError, WrongPassword
 from ..paths import vault_file

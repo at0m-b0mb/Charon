@@ -24,13 +24,24 @@ from charon.version import __version__  # noqa: E402
 
 OUT = ROOT / "assets"
 
+
+def rgb(value: str) -> tuple:
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+# Read from the application's own palette rather than copied beside it, so the
+# artwork cannot drift away from what the program actually looks like.
+INK = rgb(DARK.text)
+MUTED = rgb(DARK.text_muted)
+ACCENT = rgb(DARK.accent)
+GREEN = rgb(DARK.secure)
+TEAL = (45, 212, 191)      # one step warmer than the accent, for the hull
+
+# The banner runs a little deeper than the app's own background: it is seen as
+# an image on a web page, not as a window sitting behind content.
 BG_TOP = (10, 15, 33)
 BG_BOTTOM = (16, 28, 57)
-INK = (232, 240, 252)
-MUTED = (140, 160, 194)
-ACCENT = (56, 189, 248)
-TEAL = (45, 212, 191)
-GREEN = (52, 211, 153)
 
 FONT_CANDIDATES = {
     "display": [
