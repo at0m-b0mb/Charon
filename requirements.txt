@@ -1,0 +1,12 @@
+# Charon runtime dependencies.
+#
+# Deliberately short. Every dependency is code that runs with your credentials
+# in memory, so the list is kept to things that are unavoidable and widely
+# audited. FTPS, TLS, hashing and the config format all come from the Python
+# standard library.
+
+PyQt6>=6.6            # the interface
+paramiko>=3.4         # SSH transport and the SFTP client
+cryptography>=42.0    # AES-256-GCM and scrypt for the vault
+keyring>=25.0         # OS keychain: macOS Keychain, Windows Credential Manager,
+                      # Secret Service / KWallet on Linux

@@ -1,0 +1,4 @@
+-r requirements.txt
+
+pytest>=8.0
+Pillow>=10.0    # banner, logo and screenshot generation only

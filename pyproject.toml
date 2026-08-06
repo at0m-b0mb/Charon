@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "charon-transfer"
+dynamic = ["version"]
+description = "Secure SFTP / FTPS file transfer with a copy-and-paste interface"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "at0m-b0mb" }]
+keywords = ["sftp", "ftps", "ftp", "ssh", "file-transfer", "security", "gui"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: File Sharing",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+]
+dependencies = [
+    "PyQt6>=6.6",
+    "paramiko>=3.4",
+    "cryptography>=42.0",
+    "keyring>=25.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "Pillow>=10.0"]
+
+[project.urls]
+Homepage = "https://github.com/at0m-b0mb/Charon"
+Issues = "https://github.com/at0m-b0mb/Charon/issues"
+Changelog = "https://github.com/at0m-b0mb/Charon/blob/main/CHANGELOG.md"
+
+[project.gui-scripts]
+charon = "charon.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "charon.version.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["charon*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning:paramiko.*"]
