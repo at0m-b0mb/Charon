@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-38BDF8?style=flat-square)](#installation)
 [![Python](https://img.shields.io/badge/python-3.10%2B-2DD4BF?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 [![UI](https://img.shields.io/badge/UI-PyQt6-41CD52?style=flat-square&logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-131%20passing-34D399?style=flat-square)](#tests)
+[![Tests](https://img.shields.io/badge/tests-132%20passing-34D399?style=flat-square)](#tests)
 [![License](https://img.shields.io/badge/license-MIT-34D399?style=flat-square)](LICENSE)
 [![Telemetry](https://img.shields.io/badge/telemetry-none-F87171?style=flat-square)](#no-telemetry)
 
@@ -200,7 +200,7 @@ The directory is created `0700`. Delete it to reset Charon completely.
 
 ## Tests
 
-131 tests, including **12 that run against a real SSH server started in-process**
+132 tests, including **12 that run against a real SSH server started in-process**
 — a genuine socket, handshake and SFTP channel, with no mocking of paramiko.
 That is the only way to prove that the host key is really checked before the
 password is sent, rather than merely intended to be.

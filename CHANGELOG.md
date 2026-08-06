@@ -57,7 +57,7 @@ First release.
 - All network work on a background thread; no dialog can be raised from it.
 
 ### Tests
-- 131 tests, including 12 against a real in-process SSH server over a genuine
+- 132 tests, including 12 against a real in-process SSH server over a genuine
   socket.
 
 [1.0.0]: https://github.com/at0m-b0mb/Charon/releases/tag/v1.0.0
