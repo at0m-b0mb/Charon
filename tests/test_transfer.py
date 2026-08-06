@@ -30,7 +30,10 @@ from charon.core.transfer import (
 )
 from charon.core.transport import TransferCancelled, Transport, TransportError
 
-CONTENT = b"charon test payload " * 500
+# Deliberately full of the bytes that a text-mode file handle mangles: LF, CRLF,
+# NUL, and 0x1A (which Windows treats as end-of-file when reading in text mode).
+# An earlier payload of plain ASCII let a real newline-translation bug through.
+CONTENT = b"charon test payload \n line two\r\n\x00 nul \x1a eof " * 300
 
 
 class FakeTransport(Transport):

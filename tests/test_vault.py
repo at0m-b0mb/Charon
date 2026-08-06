@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -127,6 +128,32 @@ def test_every_write_uses_a_fresh_nonce(vault):
         raw = vault.path.read_bytes()
         nonces.add(raw[HEADER_LEN + SALT_LEN:HEADER_LEN + SALT_LEN + NONCE_LEN])
     assert len(nonces) == 12
+
+
+def test_the_file_is_never_longer_than_the_bytes_written(vault):
+    """Guards against text-mode file handles inflating the ciphertext.
+
+    On Windows, a descriptor opened without ``O_BINARY`` rewrites every 0x0A to
+    0x0D 0x0A, which corrupts the vault and breaks its GCM tag.  Ciphertext is
+    random, so any one write only has a ~16% chance of containing a newline —
+    hence the loop.  Across 30 writes a regression is caught essentially always.
+    """
+    vault.create(PASSWORD)
+    overhead = HEADER_LEN + SALT_LEN + NONCE_LEN + 16  # + GCM tag
+    for i in range(30):
+        vault.set(f"key{i}", f"value{i}")
+        expected = overhead + len(json.dumps(
+            {f"key{j}": f"value{j}" for j in range(i + 1)},
+            separators=(",", ":")).encode())
+        actual = vault.path.stat().st_size
+        assert actual == expected, (
+            f"write {i}: file is {actual} bytes, expected {expected} — "
+            f"the ciphertext was altered on its way to disk"
+        )
+        # And it must still decrypt.
+        reopened = Vault(path=vault.path)
+        reopened.unlock(PASSWORD)
+        assert reopened.get(f"key{i}") == f"value{i}"
 
 
 def test_changing_the_password_keeps_the_contents(vault):

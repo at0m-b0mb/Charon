@@ -230,7 +230,13 @@ class Vault:
         # a crash mid-write must never leave a half-vault where the real one was.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_BINARY is essential, not cosmetic: without it the Windows C runtime
+        # opens the descriptor in text mode and rewrites every 0x0A byte in the
+        # ciphertext to 0x0D 0x0A. The vault then fails its GCM tag on reopen —
+        # intermittently, depending on whether the random nonce and ciphertext
+        # happen to contain a newline byte. The constant is absent on POSIX.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        fd = os.open(tmp, flags, 0o600)
         try:
             os.write(fd, header + salt + nonce + blob)
             os.fsync(fd)

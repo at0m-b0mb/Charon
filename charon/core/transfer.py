@@ -379,7 +379,14 @@ class TransferEngine:
 
         # 0600 from the very first byte: a download is not world-readable for
         # even the instant between creation and a later chmod.
-        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if offset else os.O_TRUNC)
+        #
+        # O_BINARY matters just as much. Without it Windows opens the descriptor
+        # in text mode and turns every 0x0A in the incoming file into 0x0D 0x0A,
+        # silently corrupting every download that is not pure text — and the
+        # size check would then reject the ones that are. The constant does not
+        # exist on POSIX, hence the getattr.
+        flags = (os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)
+                 | (os.O_APPEND if offset else os.O_TRUNC))
         fd = os.open(part, flags, 0o600)
         try:
             with os.fdopen(fd, "ab" if offset else "wb", closefd=True) as sink:

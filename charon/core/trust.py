@@ -150,7 +150,9 @@ class HostKeyStore:
         b64 = base64.b64encode(key_blob).decode("ascii")
         self.forget(host, port, key_type)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
+        # newline="" keeps the file LF-terminated on Windows too, so it stays
+        # byte-for-byte interchangeable with OpenSSH's own known_hosts.
+        with self.path.open("a", encoding="utf-8", newline="") as fh:
             fh.write(f"{spec} {key_type} {b64}\n")
         harden(self.path)
 
@@ -166,7 +168,8 @@ class HostKeyStore:
                 removed += 1
                 continue
             kept.append(line)
-        self.path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        with self.path.open("w", encoding="utf-8", newline="") as fh:
+            fh.write("\n".join(kept) + ("\n" if kept else ""))
         harden(self.path)
         return removed
 
