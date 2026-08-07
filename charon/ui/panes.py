@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -238,6 +239,8 @@ class FilePane(QFrame):
         self.palette_ = palette
         self.setProperty("role", "pane")
         self.current_path = ""
+        self._entries: list[RemoteEntry] = []
+        self._show_hidden = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -275,6 +278,15 @@ class FilePane(QFrame):
         path_row.addWidget(self.newfolder_button)
         path_row.addWidget(self.refresh_button)
         head.addLayout(path_row)
+
+        # Filtering runs over the listing already in memory, so typing here
+        # never costs a network round trip — important on a remote pane where
+        # a re-list of a big directory can take seconds.
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter this folder…  (Ctrl+F)")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        head.addWidget(self.filter_edit)
         root.addWidget(header)
 
         self.tree = FileTree(side, self)
@@ -309,6 +321,26 @@ class FilePane(QFrame):
         self.tree.customContextMenuRequested.connect(self._context_menu)
 
         QShortcut(QKeySequence.StandardKey.Refresh, self, self.refresh_button.click)
+        QShortcut(QKeySequence.StandardKey.Find, self, self.focus_filter)
+        # Escape clears the filter from anywhere in the pane, so a stale filter
+        # can never leave a folder looking empty with no obvious way back.
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self.filter_edit,
+                  self.filter_edit.clear)
+
+    def focus_filter(self) -> None:
+        self.filter_edit.setFocus()
+        self.filter_edit.selectAll()
+
+    def set_palette(self, palette: Palette) -> None:
+        """Re-tint everything this pane owns after a theme change."""
+        self.palette_ = palette
+        for button, glyph in (
+            (self.up_button, "up"), (self.home_button, "home"),
+            (self.refresh_button, "refresh"), (self.newfolder_button, "newfolder"),
+        ):
+            button.setIcon(icon(glyph, palette.text_muted))
+        if self.current_path:
+            self._apply_filter()
 
     # ---------------------------------------------------------------- setup
 
@@ -323,16 +355,36 @@ class FilePane(QFrame):
 
     def show_entries(self, path: str, entries: Iterable[RemoteEntry],
                      show_hidden: bool) -> None:
+        entries = list(entries)
+        # Keep the raw listing so the filter box can re-render without asking
+        # the server again.
+        self._entries = entries
+        self._show_hidden = show_hidden
+        if path != self.current_path:
+            self.filter_edit.clear()   # a new folder starts unfiltered
         self.current_path = path
         self.path_edit.setText(path)
+        self._render(entries, show_hidden, self.filter_edit.text())
+
+    def _apply_filter(self, _text: str = "") -> None:
+        if self.current_path:
+            self._render(self._entries, self._show_hidden, self.filter_edit.text())
+
+    def _render(self, entries: Iterable[RemoteEntry], show_hidden: bool,
+                needle: str) -> None:
+        needle = needle.strip().lower()
         self.tree.setSortingEnabled(False)
         self.tree.clear()
         files = dirs = 0
         total = 0
+        hidden_by_filter = 0
         for entry in entries:
             if not show_hidden and entry.name.startswith(".") and entry.name not in (".", ".."):
                 continue
             if entry.name in (".", ".."):
+                continue
+            if needle and needle not in entry.name.lower():
+                hidden_by_filter += 1
                 continue
             item = _Item(entry.is_dir, entry.size, entry.mtime)
             item.setText(0, entry.name)
@@ -348,7 +400,7 @@ class FilePane(QFrame):
                 item.setToolTip(0, "Symbolic link — Charon does not follow these "
                                    "when copying folders.")
             item.setData(0, Qt.ItemDataRole.UserRole,
-                         self._clip_item(path, entry))
+                         self._clip_item(self.current_path, entry))
             self.tree.addTopLevelItem(item)
             if entry.is_dir:
                 dirs += 1
@@ -361,7 +413,11 @@ class FilePane(QFrame):
             bits.append(f"{dirs} folder{'s' if dirs != 1 else ''}")
         if files:
             bits.append(f"{files} file{'s' if files != 1 else ''} · {human_size(total)}")
-        self.summary.setText(" · ".join(bits) if bits else "Empty folder")
+        summary = " · ".join(bits) if bits else "Empty folder"
+        if hidden_by_filter:
+            summary = (f"{summary} · {hidden_by_filter} hidden by filter"
+                       if bits else f"Nothing matches “{needle}”")
+        self.summary.setText(summary)
 
     def _clip_item(self, path: str, entry: RemoteEntry) -> ClipItem:
         if self.side is Side.REMOTE:
@@ -372,8 +428,10 @@ class FilePane(QFrame):
     def clear(self, message: str = "") -> None:
         self.tree.clear()
         self.path_edit.setText("")
+        self.filter_edit.clear()
         self.summary.setText(message)
         self.current_path = ""
+        self._entries = []
 
     # ----------------------------------------------------------- behaviour
 
@@ -473,6 +531,22 @@ class LocalPane(FilePane):
         self.refresh_button.clicked.connect(lambda: self.load(self.current_path))
         self.show_hidden = False
 
+    def _update_free_space(self, target: Path) -> None:
+        """Show what is left on this disk.
+
+        Worth the syscall: the most annoying way for a large download to fail
+        is at 97%, and the number that would have predicted it was one line
+        away the whole time.
+        """
+        try:
+            usage = shutil.disk_usage(target)
+        except OSError:
+            self.badge.setText("")
+            return
+        self.badge.setText(f"{human_size(usage.free)} free")
+        self.badge.setToolTip(
+            f"{human_size(usage.free)} free of {human_size(usage.total)} on this disk")
+
     def load(self, path: str) -> None:
         target = Path(path).expanduser() if path else Path.home()
         if not target.is_dir():
@@ -502,6 +576,7 @@ class LocalPane(FilePane):
             self.clear(str(exc))
             return
         self.show_entries(str(target), entries, self.show_hidden)
+        self._update_free_space(target)
 
 
 class RemotePane(FilePane):

@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-38BDF8?style=flat-square)](#installation)
 [![Python](https://img.shields.io/badge/python-3.10%2B-2DD4BF?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 [![UI](https://img.shields.io/badge/UI-PyQt6-41CD52?style=flat-square&logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-132%20passing-34D399?style=flat-square)](#tests)
+[![Tests](https://img.shields.io/badge/tests-155%20passing-34D399?style=flat-square)](#tests)
 [![License](https://img.shields.io/badge/license-MIT-34D399?style=flat-square)](LICENSE)
 [![Telemetry](https://img.shields.io/badge/telemetry-none-F87171?style=flat-square)](#no-telemetry)
 
@@ -71,18 +71,26 @@ offers no hash)"* instead of pretending.
 ## Features
 
 ### Transfers
-- **Copy and paste** between panes — `Ctrl+C` / `Ctrl+V` (`⌘C` / `⌘V` on macOS)
+- **Copy and paste** between panes — `Ctrl+C` / `Ctrl+V` (`⌘C` / `⌘V` on macOS),
+  and `Ctrl+X` to move, which deletes the originals only after every byte verified
 - **Drag and drop** in both directions, and from your OS file manager
 - Recursive folder transfer, queued with per-file progress, rate and ETA
-- **Resume** interrupted transfers from the `.charon-part` sidecar
+- **Atomic in both directions** — uploads *and* downloads land on a
+  `.charon-part` sidecar and are renamed into place only once verified, so an
+  interrupted transfer can never be mistaken for a finished one
+- **Resume** interrupted transfers from that sidecar
 - Conflict handling that defaults to *keep both* — nothing is overwritten by accident
+- **Retry failed transfers** in one click, or from the queue's context menu
+- **Filter as you type** in either pane (`Ctrl+F`), over the listing already in
+  memory — no extra round trip to the server
+- Free space on the local disk shown before you start a big download
 - Cancel individual transfers or the whole queue; browsing stays responsive
   throughout, because transfers run on their own connection
 
 ### Security
 - **SFTP** over SSH, and **FTPS** over explicit TLS (`AUTH TLS` + `PROT P`)
 - Host keys and TLS certificates **pinned on first use**, in an OpenSSH-compatible
-  `known_hosts` file
+  `known_hosts` file, with a **trust-store manager** to review and revoke them
 - Weak algorithms refused outright: CBC modes, 3DES, RC4, MD5 and truncated MACs,
   SHA-1 key exchanges. TLS 1.2 floor for FTPS
 - The status-bar badge reports what was **actually negotiated**, with the cipher,
@@ -173,12 +181,30 @@ encrypted *and* the server's identity is confirmed. Click it for the cipher, key
 exchange and fingerprint. The Result column in the transfer queue tells you
 exactly what was verified for each file.
 
+**Review.** The Trusted servers button lists every host key and certificate you
+have pinned, with its fingerprint. Revoke one after a genuine server rebuild —
+and only then, because the next connection to it is trusted on sight again.
+
+### Keyboard
+
+| | |
+|---|---|
+| `Ctrl+N` | Connect |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste between panes |
+| `Ctrl+F` | Filter the focused pane · `Esc` clears it |
+| `F5` | Refresh · `Backspace` go up · `Enter` open |
+| `F2` | Rename · `Delete` delete |
+
+On macOS the `⌘` versions work too.
+
 | | |
 |---|---|
 | <img src="assets/screenshots/connect.png" alt="Connect dialog"/> | <img src="assets/screenshots/settings.png" alt="Security settings"/> |
 | Saved servers, with the auth method per site | Security policy — plain FTP is off by default |
 | <img src="assets/screenshots/paste.png" alt="Paste dialog"/> | <img src="assets/screenshots/insecure-warning.png" alt="Plaintext FTP warning"/> |
 | Paste, with the conflict rule up front | What you see before an unencrypted connection |
+| <img src="assets/screenshots/trust-store.png" alt="Trust store manager"/> | <img src="assets/screenshots/trust-first-contact.png" alt="First contact with a server"/> |
+| Every pinned identity, reviewable and revocable | First contact — check the fingerprint, then approve |
 
 ---
 
@@ -200,7 +226,7 @@ The directory is created `0700`. Delete it to reset Charon completely.
 
 ## Tests
 
-132 tests, including **12 that run against a real SSH server started in-process**
+155 tests, including **12 that run against a real SSH server started in-process**
 — a genuine socket, handshake and SFTP channel, with no mocking of paramiko.
 That is the only way to prove that the host key is really checked before the
 password is sent, rather than merely intended to be.
@@ -211,7 +237,8 @@ password is sent, rather than merely intended to be.
 
 The security-critical suites are `test_safety.py` (hostile filenames),
 `test_vault.py` (tampering and KDF downgrade), `test_trust.py` (pinning), and
-`test_sftp_live.py` (the wire).
+`test_sftp_live.py` (the wire). `test_worker_delete.py` pins down that a
+delete always targets the path you selected, never a name re-resolved later.
 
 ---
 

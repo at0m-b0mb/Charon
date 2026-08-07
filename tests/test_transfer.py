@@ -105,6 +105,8 @@ class FakeTransport(Transport):
         while True:
             if cancel is not None and cancel.is_set():
                 raise TransferCancelled()
+            if self.stall:
+                time.sleep(self.stall)
             block = source.read(4096)
             if not block:
                 break
@@ -387,3 +389,128 @@ def test_sha256_file_matches_hashlib(tmp_path):
     path = tmp_path / "f.bin"
     path.write_bytes(CONTENT)
     assert sha256_file(path) == hashlib.sha256(CONTENT).hexdigest()
+
+
+# ------------------------------------------------------- resume regressions
+
+def test_resume_does_not_destroy_an_already_complete_file(tmp_path, engine_for):
+    """Regression: "Resume" with nothing to resume used to overwrite.
+
+    With no ``.charon-part`` on disk there is no interrupted transfer to
+    continue, so the request is really a plain download onto a path that is
+    already occupied.  Silently replacing that file destroys data the user
+    never agreed to lose.
+    """
+    existing = tmp_path / "report.pdf"
+    existing.write_bytes(b"IRREPLACEABLE LOCAL FILE")
+    engine = engine_for(FakeTransport())
+    job = TransferJob(Direction.DOWNLOAD, "/data/report.pdf", existing,
+                      size=len(CONTENT), conflict=Conflict.RESUME)
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert job.state is JobState.DONE, job.error
+    assert existing.read_bytes() == b"IRREPLACEABLE LOCAL FILE"
+    assert (tmp_path / "report (2).pdf").read_bytes() == CONTENT
+
+
+def test_resume_still_continues_a_real_partial_file(tmp_path, engine_for):
+    """The other half of the fix: a genuine resume must not start renaming."""
+    part = tmp_path / "report.pdf.charon-part"
+    part.write_bytes(CONTENT[:2000])
+    engine = engine_for(FakeTransport())
+    job = TransferJob(Direction.DOWNLOAD, "/data/report.pdf", tmp_path / "report.pdf",
+                      size=len(CONTENT), conflict=Conflict.RESUME)
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert job.state is JobState.DONE, job.error
+    assert (tmp_path / "report.pdf").read_bytes() == CONTENT
+    assert not (tmp_path / "report (2).pdf").exists()
+
+
+def test_resume_onto_an_existing_file_with_a_partial_still_resumes(tmp_path, engine_for):
+    """Both a complete file and a partial present: the partial wins, and the
+    finished download replaces the file the partial belonged to."""
+    dest = tmp_path / "report.pdf"
+    dest.write_bytes(b"stale earlier copy")
+    (tmp_path / "report.pdf.charon-part").write_bytes(CONTENT[:2000])
+    engine = engine_for(FakeTransport())
+    job = TransferJob(Direction.DOWNLOAD, "/data/report.pdf", dest,
+                      size=len(CONTENT), conflict=Conflict.RESUME)
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert job.state is JobState.DONE, job.error
+    assert dest.read_bytes() == CONTENT
+
+
+# ------------------------------------------------------- upload regressions
+
+def test_an_upload_is_staged_and_renamed_into_place(tmp_path, engine_for):
+    """Uploads land on a sidecar name first, exactly as downloads do."""
+    source = tmp_path / "notes.txt"
+    source.write_bytes(CONTENT)
+    transport = FakeTransport(files={})
+    engine = engine_for(transport)
+    job = TransferJob(Direction.UPLOAD, "/data/notes.txt", source, size=len(CONTENT))
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert job.state is JobState.DONE, job.error
+    assert transport.files["/data/notes.txt"] == CONTENT
+    assert not any(k.endswith(".charon-part") for k in transport.files), \
+        "the staging file was left on the server"
+
+
+def test_an_interrupted_upload_leaves_no_truncated_file_at_the_real_name(
+        tmp_path, engine_for):
+    """The point of staging: a cancelled upload must not look complete.
+
+    Before this, a half-sent file sat at the destination filename and nothing
+    on the server could tell it apart from a finished one.
+    """
+    source = tmp_path / "big.bin"
+    source.write_bytes(CONTENT)
+    transport = FakeTransport(files={})
+    transport.stall = 0.05
+    engine = engine_for(transport)
+    job = TransferJob(Direction.UPLOAD, "/data/big.bin", source, size=len(CONTENT))
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state is JobState.RUNNING and job.transferred > 0)
+    engine.cancel(job.id)
+    assert wait_for(lambda: job.state.is_final)
+
+    assert job.state is JobState.CANCELLED
+    assert "/data/big.bin" not in transport.files
+    assert not any(k.endswith(".charon-part") for k in transport.files)
+
+
+def test_upload_resume_does_not_overwrite_the_servers_copy(tmp_path, engine_for):
+    """An upload cannot truly resume, so "Resume" must not become "Overwrite"."""
+    source = tmp_path / "notes.txt"
+    source.write_bytes(CONTENT)
+    transport = FakeTransport(files={"/data/notes.txt": b"THE SERVER'S OWN COPY"})
+    engine = engine_for(transport)
+    job = TransferJob(Direction.UPLOAD, "/data/notes.txt", source,
+                      size=len(CONTENT), conflict=Conflict.RESUME)
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert job.state is JobState.DONE, job.error
+    assert transport.files["/data/notes.txt"] == b"THE SERVER'S OWN COPY"
+    assert transport.files["/data/notes (2).txt"] == CONTENT
+
+
+def test_upload_overwrite_replaces_the_servers_copy(tmp_path, engine_for):
+    source = tmp_path / "notes.txt"
+    source.write_bytes(CONTENT)
+    transport = FakeTransport(files={"/data/notes.txt": b"old"})
+    engine = engine_for(transport)
+    job = TransferJob(Direction.UPLOAD, "/data/notes.txt", source,
+                      size=len(CONTENT), conflict=Conflict.OVERWRITE)
+    engine.submit([job])
+
+    assert wait_for(lambda: job.state.is_final), job.error
+    assert transport.files["/data/notes.txt"] == CONTENT

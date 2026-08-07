@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -31,6 +32,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -39,7 +42,7 @@ from ..core.model import AuthMethod, Credentials, Protocol, Site
 from ..core.secretstore import StorageMode, keychain_available
 from ..core.store import Settings, SiteStore
 from ..core.transfer import Conflict
-from ..core.trust import HostIdentity
+from ..core.trust import HostIdentity, sha256_fingerprint
 from .icons import icon
 from .theme import Palette
 from .util import human_size
@@ -858,3 +861,171 @@ class SettingsDialog(QDialog):
         s.theme = self.theme_box.currentData()
         s.save()
         self.accept()
+
+
+class TrustStoreDialog(QDialog):
+    """Review and revoke the server identities Charon has pinned.
+
+    A trust-on-first-use store that cannot be inspected is a liability: you can
+    approve a key but never check what you approved, and never withdraw it
+    after rebuilding a server. This is the other half of the TOFU prompt.
+    """
+
+    def __init__(self, hostkeys, pins, palette: Palette,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.hostkeys = hostkeys
+        self.pins = pins
+        self.p = palette
+        self.setWindowTitle("Trusted servers")
+        self.setMinimumSize(720, 460)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(12)
+
+        head = QHBoxLayout()
+        glyph = QLabel()
+        glyph.setPixmap(icon("shield", palette.accent, 28).pixmap(28, 28))
+        head.addWidget(glyph, 0, Qt.AlignmentFlag.AlignTop)
+        title = QLabel("Servers you have chosen to trust")
+        title.setProperty("role", "title")
+        head.addWidget(title, 1)
+        root.addLayout(head)
+
+        blurb = QLabel(
+            "Charon refuses to connect if one of these keys changes. Remove an "
+            "entry only when you know why the server's key is different — after "
+            "a genuine rebuild or key rotation. Removing it means the next "
+            "connection is trusted on sight again."
+        )
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet(f"color: {palette.text_muted};")
+        root.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["Server", "Type", "Fingerprint"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        root.addWidget(self.tree, 1)
+
+        self.empty_note = QLabel(
+            "Nothing is pinned yet. The first time you connect to a server, "
+            "Charon shows you its fingerprint and asks."
+        )
+        self.empty_note.setWordWrap(True)
+        self.empty_note.setStyleSheet(f"color: {palette.text_muted};")
+        root.addWidget(self.empty_note)
+
+        buttons = QHBoxLayout()
+        self.forget_button = QPushButton("Stop trusting this server")
+        self.forget_button.setProperty("role", "danger")
+        self.forget_button.setEnabled(False)
+        self.forget_button.clicked.connect(self._forget)
+        buttons.addWidget(self.forget_button)
+        buttons.addStretch(1)
+        close = QPushButton("Close")
+        close.setProperty("role", "primary")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        root.addLayout(buttons)
+
+        self._reload()
+
+    # ------------------------------------------------------------ contents
+
+    def _reload(self) -> None:
+        self.tree.clear()
+        rows = 0
+        for hostspec, key_type, b64 in self._ssh_entries():
+            blob = _b64_bytes(b64)
+            item = QTreeWidgetItem([hostspec, key_type,
+                                    sha256_fingerprint(blob) if blob else "(unreadable)"])
+            item.setIcon(0, icon("lock", self.p.secure))
+            item.setData(0, Qt.ItemDataRole.UserRole, ("ssh", hostspec, key_type))
+            self.tree.addTopLevelItem(item)
+            rows += 1
+
+        for label, fingerprint in self._cert_entries():
+            item = QTreeWidgetItem([label, "TLS certificate", fingerprint])
+            item.setIcon(0, icon("lock", self.p.secure))
+            item.setData(0, Qt.ItemDataRole.UserRole, ("tls", label, ""))
+            self.tree.addTopLevelItem(item)
+            rows += 1
+
+        self.empty_note.setVisible(rows == 0)
+        self.tree.setVisible(rows > 0)
+
+    def _ssh_entries(self) -> list[tuple[str, str, str]]:
+        try:
+            return self.hostkeys._entries()
+        except OSError:
+            return []
+
+    def _cert_entries(self) -> list[tuple[str, str]]:
+        try:
+            return sorted(self.pins._load().items())
+        except OSError:
+            return []
+
+    def _selection_changed(self) -> None:
+        self.forget_button.setEnabled(bool(self.tree.selectedItems()))
+
+    def _forget(self) -> None:
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        kind, label, key_type = items[0].data(0, Qt.ItemDataRole.UserRole)
+
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Stop trusting this server?")
+        confirm.setText(f"Remove the pinned identity for {label}?")
+        confirm.setInformativeText(
+            "The next connection to it will be treated as a first contact, and "
+            "Charon will ask you to approve a fingerprint again — so you lose the "
+            "protection against that server's key being swapped in the meantime."
+        )
+        confirm.setStandardButtons(QMessageBox.StandardButton.Cancel |
+                                   QMessageBox.StandardButton.Yes)
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        host, port = _split_hostspec(label, 22 if kind == "ssh" else 21)
+        if kind == "ssh":
+            self.hostkeys.forget(host, port, key_type)
+        else:
+            self.pins.forget(host, port)
+        self._reload()
+
+
+def _b64_bytes(value: str) -> bytes:
+    import base64
+
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return b""
+
+
+def _split_hostspec(spec: str, default_port: int) -> tuple[str, int]:
+    """Undo the OpenSSH ``[host]:port`` / bare-host encoding."""
+    if spec.startswith("[") and "]:" in spec:
+        host, _, port = spec[1:].partition("]:")
+        try:
+            return host, int(port)
+        except ValueError:
+            return host, default_port
+    if spec.count(":") == 1:            # "host:port" from the cert pin store
+        host, _, port = spec.rpartition(":")
+        try:
+            return host, int(port)
+        except ValueError:
+            return spec, default_port
+    return spec, default_port

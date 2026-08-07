@@ -18,6 +18,8 @@ Read this file as three collaborations:
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -45,7 +47,13 @@ from ..core.policy import Verdict, check_connection
 from ..core.secretstore import SecretStore, StorageMode, secret_id
 from ..core.session import Session
 from ..core.store import Settings, SiteStore
-from ..core.transfer import JobState, TransferEngine, TransferJob
+from ..core.transfer import (
+    Conflict,
+    Direction,
+    JobState,
+    TransferEngine,
+    TransferJob,
+)
 from ..core.trust import CertPinStore, HostKeyStore, sha256_fingerprint
 from ..core.vault import Vault, VaultError, WrongPassword
 from ..paths import vault_file
@@ -56,8 +64,10 @@ from .dialogs import (
     PasteDialog,
     SettingsDialog,
     TrustDialog,
+    TrustStoreDialog,
     VaultDialog,
 )
+from .icons import clear_cache as clear_icon_cache
 from .icons import icon
 from .panes import LocalPane, RemotePane
 from .queue_view import TransferQueueView
@@ -115,6 +125,10 @@ class SecurityBadge(QFrame):
         layout.addWidget(self.label)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_state(None)
+
+    def set_palette(self, palette) -> None:
+        self.p = palette
+        self.set_state(self.state)
 
     def set_state(self, state: Optional[SecurityState]) -> None:
         self.state = state
@@ -201,6 +215,13 @@ class MainWindow(QMainWindow):
         self._idle_timer.timeout.connect(self._tick)
         self._idle_timer.start(20_000)
 
+        # Debounces local directory rescans while a batch is landing.
+        self._local_refresh = QTimer(self)
+        self._local_refresh.setSingleShot(True)
+        self._local_refresh.setInterval(400)
+        self._local_refresh.timeout.connect(
+            lambda: self.local_pane.load(self.local_pane.current_path))
+
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
@@ -232,6 +253,11 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_upload)
 
         toolbar.addSeparator()
+
+        self.act_trust = QAction(icon("shield", self.p.text_muted), "Trusted servers", self)
+        self.act_trust.setToolTip("Review and revoke the server keys you have pinned")
+        self.act_trust.triggered.connect(self.open_trust_store)
+        toolbar.addAction(self.act_trust)
 
         self.act_settings = QAction(icon("gear", self.p.text_muted), "Settings", self)
         self.act_settings.triggered.connect(self.open_settings)
@@ -322,6 +348,7 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self.on_failed)
         self.worker.status.connect(self.set_status)
         self.worker.busy.connect(self.on_busy)
+        self.worker.jobs_ready.connect(self.on_jobs_queued)
 
     def _wire(self) -> None:
         for pane in (self.local_pane, self.remote_pane):
@@ -344,7 +371,10 @@ class MainWindow(QMainWindow):
         self.bridge.went_idle.connect(self.on_engine_idle)
 
         self.queue.cancel_all_requested.connect(self.on_cancel_all)
+        self.queue.cancel_one_requested.connect(self.on_cancel_one)
         self.queue.clear_requested.connect(self.on_clear_finished)
+        self.queue.retry_requested.connect(self.on_retry)
+        self.queue.reveal_requested.connect(self.on_reveal)
 
     # ------------------------------------------------------------- connect
 
@@ -581,12 +611,24 @@ class MainWindow(QMainWindow):
         self._arm_move(items)
 
     def _arm_move(self, items: list) -> None:
-        """Remember a cut so the sources can be removed — but only once every
-        job in the batch has finished and verified."""
+        """Remember a cut so the sources can be removed once — and only once —
+        every job *in this batch* has finished and verified."""
         if self.clipboard.operation is Operation.CUT and items is self.clipboard.items:
             self._move_batch = (list(items), set())
         else:
             self._move_batch = None
+
+    def on_jobs_queued(self, jobs: list) -> None:
+        """Record which job ids belong to the pending move.
+
+        Without this the completion check looks at every job the engine has
+        ever run, so one unrelated failure earlier in the session would block
+        every later move for good.
+        """
+        if self._move_batch is None:
+            return
+        sources, ids = self._move_batch
+        ids.update(j.id for j in jobs)
 
     # ------------------------------------------------------------- engine
 
@@ -612,8 +654,10 @@ class MainWindow(QMainWindow):
         self.queue.upsert(job)
         if self.engine is not None:
             self.queue.summarise(self.engine.jobs)
-        if job.state is JobState.DONE and job.direction.value == "download":
-            self.local_pane.load(self.local_pane.current_path)
+        if job.state is JobState.DONE and job.direction is Direction.DOWNLOAD:
+            # Coalesced: a 500-file batch would otherwise rescan the folder 500
+            # times, and on a slow disk that costs more than the transfer.
+            self._local_refresh.start()
 
     def on_engine_idle(self) -> None:
         if self.engine is None:
@@ -625,42 +669,127 @@ class MainWindow(QMainWindow):
         self._finish_move(jobs)
 
     def _finish_move(self, jobs: list[TransferJob]) -> None:
+        """Complete a cut/paste by removing the sources — never before every
+        byte has landed and verified."""
         if self._move_batch is None:
             return
-        sources, _ = self._move_batch
-        if any(j.state is not JobState.DONE for j in jobs if not j.state.is_final):
+        sources, batch_ids = self._move_batch
+        if not batch_ids:
+            return  # the jobs have not been queued yet
+        batch = [j for j in jobs if j.id in batch_ids]
+        if not batch or any(not j.state.is_final for j in batch):
             return
-        if any(j.state in (JobState.FAILED, JobState.CANCELLED) for j in jobs):
+
+        failed = [j for j in batch if j.state is not JobState.DONE]
+        if failed:
             self._move_batch = None
-            self.set_status("Move cancelled — some transfers did not complete, so "
-                            "nothing was deleted")
+            self.set_status(
+                f"Move stopped — {len(failed)} of {len(batch)} transfers did not "
+                f"complete, so nothing was deleted"
+            )
             return
+
         self._move_batch = None
         remote_sources = [s for s in sources if s.side is Side.REMOTE]
-        if remote_sources:
-            names = ", ".join(s.name for s in remote_sources[:3])
-            box = QMessageBox(self)
-            box.setWindowTitle("Finish the move?")
-            box.setText(f"Delete the originals on the server ({names}…)?")
-            box.setInformativeText(
-                "Every file transferred and verified. Deleting the server copies "
-                "completes the move; keeping them turns it into a copy."
-            )
-            box.setStandardButtons(QMessageBox.StandardButton.Cancel |
-                                   QMessageBox.StandardButton.Yes)
-            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            if box.exec() == QMessageBox.StandardButton.Yes:
-                from ..core.model import RemoteEntry
+        local_sources = [s for s in sources if s.side is Side.LOCAL]
+        where = "the server" if remote_sources else "this device"
+        originals = remote_sources or local_sources
+        if not originals:
+            return
 
-                entries = [RemoteEntry(name=s.name, is_dir=s.is_dir) for s in remote_sources]
-                self.request_delete.emit(entries)
+        names = ", ".join(s.name for s in originals[:3])
+        if len(originals) > 3:
+            names += f", and {len(originals) - 3} more"
+        box = QMessageBox(self)
+        box.setWindowTitle("Finish the move?")
+        box.setText(f"Delete the originals on {where}?")
+        box.setInformativeText(
+            f"{names}\n\nAll {len(batch)} file(s) transferred and verified. "
+            f"Deleting the originals completes the move; keeping them turns it "
+            f"into a copy."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel |
+                               QMessageBox.StandardButton.Yes)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            if remote_sources:
+                # By absolute path: the user may well have browsed elsewhere
+                # while the transfer ran.
+                self.request_delete.emit(
+                    [(s.path, s.is_dir, False) for s in remote_sources])
+            else:
+                self._delete_local_paths([Path(s.path) for s in local_sources])
         self.clipboard.clear()
         self._update_clip_label()
+
+    def _delete_local_paths(self, paths: list[Path]) -> None:
+        import shutil
+
+        removed = 0
+        for path in paths:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                removed += 1
+            except OSError as exc:
+                QMessageBox.warning(self, "Could not delete", str(exc))
+                break
+        if removed:
+            self.set_status(f"Move complete — removed {removed} original(s)")
+        self.local_pane.load(self.local_pane.current_path)
 
     def on_cancel_all(self) -> None:
         if self.engine is not None:
             self.engine.cancel_all()
             self.set_status("Stopping transfers…")
+
+    def on_cancel_one(self, job_id: int) -> None:
+        if self.engine is not None:
+            self.engine.cancel(job_id)
+
+    def on_retry(self, jobs: list) -> None:
+        """Queue failed transfers again as fresh jobs.
+
+        New jobs rather than resurrected ones: a job carries the state of the
+        attempt that failed (bytes moved, error text, timings), and reusing it
+        would leave the queue showing a half-truth about what just happened.
+        """
+        if self.engine is None or not jobs:
+            return
+        retries = [
+            TransferJob(
+                direction=job.direction,
+                remote_path=job.remote_path,
+                local_path=job.local_path,
+                size=max(0, job.size),
+                # Resume rather than start over: a failure part-way through a
+                # large file usually leaves a .charon-part worth continuing.
+                conflict=Conflict.RESUME,
+            )
+            for job in jobs
+        ]
+        self.engine.submit(retries)
+        self.set_status(f"Retrying {len(retries)} transfer(s)")
+
+    def on_reveal(self, job: TransferJob) -> None:
+        """Show a finished download in the platform's file manager."""
+        path = Path(job.local_path)
+        if not path.exists():
+            self.set_status(f"{path.name} is no longer there")
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)])
+            elif sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", "/select,", str(path)])
+            else:
+                # Freedesktop file managers vary; opening the parent folder is
+                # the one behaviour they all agree on.
+                subprocess.Popen(["xdg-open", str(path.parent)])
+        except OSError as exc:
+            self.set_status(f"Could not open a file manager: {exc}")
 
     def on_clear_finished(self) -> None:
         if self.engine is None:
@@ -691,27 +820,14 @@ class MainWindow(QMainWindow):
     def on_local_delete(self, items: list) -> None:
         if not items or not self._confirm_delete(items, "this device"):
             return
-        import shutil
-
-        for item in items:
-            try:
-                path = Path(item.path)
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-            except OSError as exc:
-                QMessageBox.warning(self, "Could not delete", str(exc))
-                break
-        self.local_pane.load(self.local_pane.current_path)
+        self._delete_local_paths([Path(i.path) for i in items])
 
     def on_remote_delete(self, items: list) -> None:
         if not items or not self._confirm_delete(items, "the server"):
             return
-        from ..core.model import RemoteEntry
-
-        entries = [RemoteEntry(name=i.name, is_dir=i.is_dir, size=i.size) for i in items]
-        self.request_delete.emit(entries)
+        # Absolute paths captured now, before the confirmation dialog gave the
+        # user a chance to navigate somewhere else.
+        self.request_delete.emit([(i.path, i.is_dir, False) for i in items])
 
     def _confirm_delete(self, items: list, where: str) -> bool:
         if not self.settings.confirm_delete:
@@ -808,11 +924,11 @@ class MainWindow(QMainWindow):
         if self.settings.theme != previous_theme:
             self.p = get_palette(self.settings.theme)
             self._apply_theme()
-            QMessageBox.information(
-                self, "Appearance",
-                "The new theme is applied. Restart Charon for icons and the "
-                "security badge to pick up the new colours everywhere.")
         self.set_status("Settings saved")
+
+    def open_trust_store(self) -> None:
+        self._touch()
+        TrustStoreDialog(self.hostkeys, self.pins, self.p, self).exec()
 
     def show_about(self) -> None:
         box = QMessageBox(self)
@@ -835,9 +951,30 @@ class MainWindow(QMainWindow):
         reads as a browser popup — exactly the wrong instinct to train. Setting
         the sheet on the QApplication keeps every dialog inside Charon's skin.
         """
+        clear_icon_cache()
         app = QApplication.instance()
         target = app if app is not None else self
         target.setStyleSheet(stylesheet(self.p))
+
+        # Widgets hold their own QIcon references, so clearing the cache is
+        # not enough — each one has to be handed a freshly tinted glyph.
+        for action, glyph, tint in (
+            (getattr(self, "act_connect", None), "connect", self.p.accent),
+            (getattr(self, "act_disconnect", None), "stop", self.p.text_muted),
+            (getattr(self, "act_download", None), "download", self.p.accent),
+            (getattr(self, "act_upload", None), "upload", self.p.accent),
+            (getattr(self, "act_settings", None), "gear", self.p.text_muted),
+            (getattr(self, "act_trust", None), "shield", self.p.text_muted),
+        ):
+            if action is not None:
+                action.setIcon(icon(glyph, tint))
+        for pane in (getattr(self, "local_pane", None), getattr(self, "remote_pane", None)):
+            if pane is not None:
+                pane.set_palette(self.p)
+        if getattr(self, "queue", None) is not None:
+            self.queue.set_palette(self.p)
+        if getattr(self, "badge", None) is not None:
+            self.badge.set_palette(self.p)
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(message)

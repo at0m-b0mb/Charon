@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from charon.core.transfer import Direction, JobState, TransferJob  # noqa: E402
 from charon.core.trust import HostKeyStore  # noqa: E402
 from charon.ui.dialogs import (  # noqa: E402
     ConnectDialog, InsecureConnectionDialog, PasteDialog, SettingsDialog, TrustDialog,
+    TrustStoreDialog,
 )
 from charon.ui.main_window import MainWindow  # noqa: E402
 from charon.ui.theme import palette  # noqa: E402
@@ -219,6 +221,18 @@ def main() -> int:
          "paste.png", QSize(560, 360))
 
     save(SettingsDialog(settings, p), "settings.png", QSize(660, 480))
+
+    # The trust store, populated with a plausible set of pinned identities.
+    from charon.core.trust import CertPinStore
+
+    demo_keys = HostKeyStore(path=Path(tempfile.mkdtemp()) / "known_hosts")
+    demo_pins = CertPinStore(path=Path(tempfile.mkdtemp()) / "pins.json")
+    demo_keys.trust("files.example.com", 22, "ssh-ed25519",
+                    b"\x00\x00\x00\x0bssh-ed25519" + bytes(range(32)))
+    demo_keys.trust("build.example.com", 2222, "ecdsa-sha2-nistp256",
+                    b"\x00\x00\x00\x13ecdsa-sha2-nistp256" + bytes(range(64)))
+    demo_pins.trust("nas.local", 21, b"\x30\x82" + bytes(range(48)))
+    save(TrustStoreDialog(demo_keys, demo_pins, p), "trust-store.png", QSize(720, 420))
 
     window.thread.quit()
     window.thread.wait(2000)

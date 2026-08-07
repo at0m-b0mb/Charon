@@ -21,7 +21,7 @@ from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from ..core.model import RemoteEntry
-from ..core.safety import remote_join
+from ..core.safety import normalise_remote, remote_join
 from ..core.session import PolicyBlocked, Session
 from ..core.transfer import Conflict, TransferJob
 from ..core.transport import (
@@ -182,17 +182,24 @@ class SessionWorker(QObject):
             self.failed.emit(str(exc))
 
     @pyqtSlot(object)
-    def do_delete(self, entries: object) -> None:
+    def do_delete(self, targets: object) -> None:
+        """Delete remote items given as ``(absolute_path, is_dir, is_symlink)``.
+
+        Absolute paths, deliberately.  Resolving a bare filename against the
+        *current* directory looks equivalent and is not: a delete can be queued
+        behind a long transfer, or sit under a confirmation dialog, while the
+        user navigates somewhere else — and it would then erase a same-named
+        file in whatever directory they happened to land in.
+        """
         if self._transport is None:
             return
         removed = 0
-        for entry in list(entries):  # type: ignore[arg-type]
-            path = remote_join(self._transport.cwd, entry.name)
+        for path, is_dir, is_symlink in list(targets):  # type: ignore[arg-type]
             try:
-                if entry.is_dir and not entry.is_symlink:
-                    self._delete_tree(path)
+                if is_dir and not is_symlink:
+                    self._delete_tree(normalise_remote(path))
                 else:
-                    self._transport.remove(path)
+                    self._transport.remove(normalise_remote(path))
                 removed += 1
             except TransportError as exc:
                 self.failed.emit(str(exc))

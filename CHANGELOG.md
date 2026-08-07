@@ -4,6 +4,65 @@ All notable changes to Charon are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-08-07
+
+Bug-fix and feature release. **Everyone on 1.0.0 should upgrade** — this fixes
+three ways Charon could destroy a file you did not ask it to touch.
+
+### Fixed — data loss
+
+- **"Resume" silently overwrote a complete file.** Choosing the Resume conflict
+  rule when there was no `.charon-part` to continue from meant a plain download
+  onto an occupied path — and the finished transfer replaced whatever was there.
+  Resume with nothing to resume now falls back to *keep both*, the same promise
+  the default rule makes. The upload side had the identical bug and the same fix.
+- **A delete could land in the wrong directory.** Deletion resolved bare
+  filenames against the *current* remote directory, so a delete queued behind a
+  long transfer — or one waiting under its confirmation dialog — would erase a
+  same-named file in whatever folder you had browsed to in the meantime.
+  Deletion is now path-based end to end.
+- **Interrupted uploads left a truncated file at the real filename**, looking on
+  the server exactly like a finished one. Uploads are now staged on a
+  `.charon-part` name and renamed into place only after the size is confirmed,
+  matching what downloads already did. A failed upload cleans up after itself.
+- **On Windows, every binary download and the vault itself were corrupted.**
+  Descriptors were opened without `O_BINARY`, so Windows ran them in text mode
+  and rewrote every `0x0A` byte as `0x0D 0x0A`. Any non-text download arrived
+  damaged, and the vault's ciphertext was mangled badly enough to break its GCM
+  tag. Present in the v1.0.0 artifacts; fixed here, with a regression test that
+  asserts the vault file is never longer than the bytes written to it.
+
+### Fixed — other
+
+- Cut/paste checked *every* job the engine had ever run before completing a
+  move, so a single unrelated failure earlier in the session blocked every later
+  move permanently. Batches are now tracked by job id.
+- Cut/paste from local to remote never removed the local originals — a "move"
+  quietly behaved as a copy. Both directions now complete properly.
+- A batch of downloads rescanned the local directory once per completed file.
+  Rescans are coalesced.
+- Theme changes no longer ask for a restart; icons, the security badge and the
+  progress bars all re-tint live.
+
+### Added
+
+- **Trust-store manager** — review every pinned host key and TLS certificate
+  with its fingerprint, and revoke one after a genuine server rebuild. A
+  trust-on-first-use store you cannot inspect is a liability.
+- **Filter as you type** in either pane (`Ctrl+F`, `Esc` to clear), applied to
+  the listing already in memory so it costs no network round trip.
+- **Retry failed transfers**, from the queue's toolbar or its context menu.
+  Retries resume rather than restart.
+- Queue context menu: show a finished download in the file manager, stop a
+  running transfer, copy an error message.
+- Free space on the local disk, shown in the pane header.
+
+### Tests
+
+155 (up from 132), including regressions for all six defects above.
+
+---
+
 ## [1.0.0] — 2026-08-06
 
 First release.

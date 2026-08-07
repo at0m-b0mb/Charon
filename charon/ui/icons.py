@@ -57,6 +57,17 @@ def icon(name: str, color: str, size: int = 18) -> QIcon:
     return _CACHE[key]
 
 
+def clear_cache() -> None:
+    """Drop cached glyphs so a palette change repaints them.
+
+    The cache is keyed by colour, so stale entries are never *wrong* — but a
+    theme switch would otherwise leave every already-built QIcon holding the
+    old tint, because the widgets keep their own references.
+    """
+    _CACHE.clear()
+    _ARROW_CACHE.clear()
+
+
 def _pixmap(name: str, color: str, size: int) -> QPixmap:
     # Back the icon with twice as many real pixels so it stays crisp on Retina.
     # Setting the device-pixel-ratio is the *whole* adjustment: QPainter's

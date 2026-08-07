@@ -353,18 +353,33 @@ class TransferEngine:
     def _download(self, transport: Transport, job: TransferJob) -> None:
         dest = job.local_path
         dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + PART_SUFFIX)
+
+        # Can this actually resume?  Only if there is a partial file to continue
+        # from *and* the protocol supports an offset.
+        resumable = (
+            job.conflict is Conflict.RESUME
+            and part.exists()
+            and transport.supports_resume()
+        )
 
         if dest.exists():
             if job.conflict is Conflict.SKIP:
                 job.state = JobState.SKIPPED
                 return
-            if job.conflict is Conflict.RENAME:
+            # "Resume" with nothing to resume is just a plain download, and the
+            # destination is already a complete file.  Overwriting it here would
+            # destroy data the user never agreed to lose, so it falls back to
+            # keep-both — the same promise the default conflict rule makes.
+            if job.conflict is Conflict.RENAME or (
+                job.conflict is Conflict.RESUME and not resumable
+            ):
                 dest = unique_path(dest)
                 job.local_path = dest
+                part = dest.with_name(dest.name + PART_SUFFIX)
 
-        part = dest.with_name(dest.name + PART_SUFFIX)
         offset = 0
-        if job.conflict is Conflict.RESUME and part.exists() and transport.supports_resume():
+        if resumable and part.exists():
             offset = part.stat().st_size
             if job.size and offset > job.size:
                 offset = 0  # server's copy shrank; start over rather than guess
@@ -463,19 +478,38 @@ class TransferEngine:
                 if job.conflict is Conflict.SKIP:
                     job.state = JobState.SKIPPED
                     return
-                if job.conflict is Conflict.RENAME:
+                # RESUME is treated as RENAME here: an upload cannot be
+                # continued reliably (the server's partial length is not proof
+                # of what it holds), so the safe reading of "resume" is the one
+                # that does not clobber the file already on the server.
+                if job.conflict in (Conflict.RENAME, Conflict.RESUME):
                     remote = _unique_remote(transport, remote)
                     job.remote_path = remote
 
         job.size = source_path.stat().st_size
         digest = hashlib.sha256()
-        with source_path.open("rb") as raw:
-            source = _HashingSource(raw, digest)
-            job.transferred = transport.upload(
-                source, remote, size=job.size,
-                progress=lambda done, total: self._progress(job, done, total),
-                cancel=self._cancel_current,
-            )
+
+        # Upload to a sidecar name and rename into place, mirroring what
+        # downloads do. Without this, pulling the plug mid-upload leaves a
+        # truncated file sitting at the real filename on the server, looking
+        # for all the world like a complete one.
+        staging = remote + PART_SUFFIX
+        try:
+            with source_path.open("rb") as raw:
+                source = _HashingSource(raw, digest)
+                job.transferred = transport.upload(
+                    source, staging, size=job.size,
+                    progress=lambda done, total: self._progress(job, done, total),
+                    cancel=self._cancel_current,
+                )
+            self._promote_upload(transport, job, staging, remote)
+        except BaseException:
+            # Never leave a stray .charon-part behind on the server.
+            try:
+                transport.remove(staging)
+            except Exception:
+                pass
+            raise
 
         remote_hash = transport.remote_sha256(remote) if self.verify else None
         local_hash = digest.hexdigest()
@@ -486,6 +520,29 @@ class TransferEngine:
             )
         job.integrity = (f"SHA-256 verified ({local_hash[:16]}…)" if remote_hash
                          else f"sent {job.transferred} bytes; SHA-256 {local_hash[:16]}…")
+
+    def _promote_upload(self, transport: Transport, job: TransferJob,
+                        staging: str, remote: str) -> None:
+        """Check the staged upload, then move it onto the real name."""
+        try:
+            staged = transport.stat(staging)
+        except TransportError:
+            staged = None
+        if staged is not None and job.size and staged.size != job.size:
+            raise TransportError(
+                f"Size mismatch after upload: sent {job.size} bytes, the server "
+                f"stored {staged.size}. The partial file has been removed."
+            )
+
+        # Most servers refuse to rename onto an existing name, so clear the way
+        # first. This is the one moment the destination is briefly absent, and
+        # it only happens once the new copy is already on the server intact.
+        try:
+            if transport.stat(remote) is not None:
+                transport.remove(remote)
+        except TransportError:
+            pass
+        transport.rename(staging, remote)
 
     # --------------------------------------------------------------- inner
 
